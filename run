@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -e
+
+# Build and launch OS in QEMU
+make run

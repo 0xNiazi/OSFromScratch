@@ -221,18 +221,87 @@ Developing for real physical silicon revealed several critical architectural les
 
 ---
 
-## 8. Summary of Project Map
+## 8. Phase 2: Hardware Port I/O & The VGA Display Driver
+
+### 8.1 Port-Mapped I/O (PMIO) Architecture
+While video memory (`0xB8000`) uses Memory-Mapped I/O (MMIO), motherboard controllers communicate via a dedicated 16-bit address space (Ports `0x0000` to `0xFFFF`):
+* Standard memory pointers cannot touch this space.
+* The CPU provides dedicated hardware opcodes: `IN` (read from port) and `OUT` (write to port).
+* Using GCC's `-masm=intel` flag, we implemented pure Intel syntax inline assembly:
+  * `in al, dx` (Destination `AL`, Source `DX`)
+  * `out dx, al` (Destination `DX`, Source `AL`)
+
+```mermaid
+flowchart TD
+    subgraph CPU
+        REG_AL["AL (Data Byte)"]
+        REG_DX["DX (Port Address)"]
+    end
+
+    subgraph I/O Bus
+        IO_PORT["I/O Port (0x0000 - 0xFFFF)"]
+    end
+
+    subgraph Peripherals
+        VGA_CTRL["VGA Controller (0x3D4 / 0x3D5)"]
+        KEYBOARD["PS/2 Keyboard (0x60)"]
+        PIC_CHIP["8259 PIC (0x20 / 0xA0)"]
+    end
+
+    REG_AL -->|"out dx, al"| IO_PORT
+    IO_PORT -->|"in al, dx"| REG_AL
+    IO_PORT --> VGA_CTRL & KEYBOARD & PIC_CHIP
+```
+
+### 8.2 CRT Controller & Hardware Cursor Control
+The physical VGA blinking text cursor is driven by the internal CRT Controller registers:
+* **Index / Address Register:** Port `0x3D4`
+* **Data Register:** Port `0x3D5`
+To position the cursor at linear offset $\text{pos} = (y \times 80) + x$:
+1. Select Register `0x0E` via Port `0x3D4`, write high byte `(pos >> 8) & 0xFF` to Port `0x3D5`.
+2. Select Register `0x0F` via Port `0x3D4`, write low byte `pos & 0xFF` to Port `0x3D5`.
+
+### 8.3 VGA Color Encoding & Coordinate Mapping
+* Color attribute byte packing:
+  $$\text{Attribute Byte} = \text{Foreground} \mid (\text{Background} \ll 4)$$
+* Memory offset for grid cell $(x, y)$:
+  $$\text{Byte Offset} = 2 \times (y \times 80 + x)$$
+  * Even byte: ASCII Character
+  * Odd byte: Color Attribute
+
+### 8.4 The Driver Abstraction Layer
+```mermaid
+flowchart TD
+    KM["kernel_main()"] --> VP["vga_print()"]
+    KM --> VDB["vga_draw_block()"]
+    KM --> VC["vga_clear()"]
+    VP --> VPC["vga_put_char()"]
+    VPC --> VSC["vga_set_cursor()"]
+    VC --> VSC
+    VSC --> OUTB["outb() [ports.c]"]
+    VPC --> MMIO["0xB8000 (Video RAM)"]
+    VDB --> MMIO
+```
+
+---
+
+## 9. Summary of Project Map
 
 ```text
 OSfromScratch/
 ├── boot/
 │   ├── boot.asm           # 16-bit MBR, disk reader, 32-bit switch, far jump
 │   └── gdt.asm            # GDT null, code, data descriptors & GDTR structure
+├── drivers/
+│   ├── ports.c            # Hardware port I/O (inb, outb) in Intel asm
+│   └── vga.c              # VGA text driver (clear, print, cursor, block render)
 ├── kernel/
 │   ├── kernel_entry.asm   # 32-bit trampoline calling kernel_main
-│   └── kernel.c           # Freestanding C entry point & screen loop
+│   └── kernel.c           # High-level C kernel entry point
 ├── include/
-│   └── types.h            # Bare-metal fixed-width types (uint8_t, size_t, NULL)
+│   ├── types.h            # Bare-metal fixed-width types (uint8_t, size_t, NULL)
+│   ├── ports.h            # Hardware port function prototypes
+│   └── vga.h              # VGA dimensions, 16-color palette & API prototypes
 ├── linker.ld              # Memory layout linking code at 0x1000
 ├── Makefile               # Automated compilation, disk assembly & QEMU launcher
 ├── run                    # Executable launcher script

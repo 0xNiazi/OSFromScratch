@@ -6,6 +6,15 @@ static volatile uint8_t *video_memory = (volatile uint8_t *) 0xB8000;
 static int cursor_x = 0;
 static int cursor_y = 0;
 
+
+int vga_get_x(void){
+    return cursor_x;
+} 
+int vga_get_y(void){
+    return cursor_y;
+} 
+
+
 uint16_t vga_pos_calc(uint8_t x,uint8_t y){
     //calculating the cursor pos
     uint16_t pos = y * VGA_WIDTH +x;

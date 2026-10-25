@@ -14,6 +14,9 @@ VGA_COLOR_BLACK,VGA_COLOR_BLUE,VGA_COLOR_GREEN,VGA_COLOR_CYAN,VGA_COLOR_RED,VGA_
 
 #define VGA_COLOR(fg,bg) ((fg) | (bg)<< 4)
 
+int vga_get_x(void) ;
+int vga_get_y(void) ;
+
 void vga_clear(uint8_t color);
 void vga_put_char(char c, uint8_t color);
 void vga_print(const char *str, uint8_t color);

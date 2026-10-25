@@ -15,6 +15,9 @@ BOOT_BIN         := boot.bin
 KERNEL_ENTRY_SRC := kernel/kernel_entry.asm
 KERNEL_ENTRY_OBJ := kernel/kernel_entry.o
 
+INTERRUPT_SRC    := kernel/interrupt.asm
+INTERRUPT_OBJ    := kernel/interrupt.o
+
 # Find all C source files in kernel/ and drivers/
 C_SRCS           := $(wildcard kernel/*.c drivers/*.c)
 C_OBJS           := $(C_SRCS:.c=.o)
@@ -30,8 +33,11 @@ all: $(OS_IMAGE)
 $(BOOT_BIN): $(BOOT_SRC) boot/gdt.asm
 	$(ASM) -f bin $< -o $@
 
-# Assemble kernel entry point
+# Assemble kernel entry point and interrupt stubs
 $(KERNEL_ENTRY_OBJ): $(KERNEL_ENTRY_SRC)
+	$(ASM) -f elf32 $< -o $@
+
+$(INTERRUPT_OBJ): $(INTERRUPT_SRC)
 	$(ASM) -f elf32 $< -o $@
 
 # Pattern rule for compiling all C files in kernel/ and drivers/
@@ -39,8 +45,8 @@ $(KERNEL_ENTRY_OBJ): $(KERNEL_ENTRY_SRC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Link all object files into flat binary
-$(KERNEL_BIN): $(KERNEL_ENTRY_OBJ) $(C_OBJS) linker.ld
-	$(LD) $(LDFLAGS) $(KERNEL_ENTRY_OBJ) $(C_OBJS) -o $@
+$(KERNEL_BIN): $(KERNEL_ENTRY_OBJ) $(INTERRUPT_OBJ) $(C_OBJS) linker.ld
+	$(LD) $(LDFLAGS) $(KERNEL_ENTRY_OBJ) $(INTERRUPT_OBJ) $(C_OBJS) -o $@
 
 # Combine bootloader and kernel into a bootable disk image (padded to 64K)
 $(OS_IMAGE): $(BOOT_BIN) $(KERNEL_BIN)

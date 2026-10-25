@@ -285,7 +285,91 @@ flowchart TD
 
 ---
 
-## 9. Summary of Project Map
+## 9. Phase 3: Hardware Interrupts, 8259 PIC, PS/2 Keyboard & 8254 PIT Timer
+
+### 9.1 The Interrupt Architecture (IDT)
+In 32-bit Protected Mode, interrupts and exceptions are vectored through the **Interrupt Descriptor Table (IDT)**:
+* An array of **256 8-byte descriptors** loaded into the CPU via the `lidt [idt_ptr]` instruction.
+* **Vector Layout:**
+  * Vectors `0..31` (`0x00..0x1F`): **CPU Hardware Exceptions** (Faults, Traps, Aborts).
+  * Vectors `32..47` (`0x20..0x2F`): **Hardware IRQs** (mapped from the 8259 PIC).
+  * Vectors `48..255` (`0x30..0xFF`): **Software Interrupts / System Calls**.
+
+```text
+ 63                  48 47          40 39       32 31               16 15                0
++----------------------+--------------+-----------+-------------------+--------------------+
+|  Handler Offset High |  Type & Attr |   Zero    |  Segment Selector | Handler Offset Low |
+|      (bits 16..31)   |   (1 byte)   |  (1 byte) |  (2 bytes: 0x08)  |    (bits 0..15)    |
++----------------------+--------------+-----------+-------------------+--------------------+
+```
+* **Flags byte `0x8E`:** Present = 1, Ring 0 = 00, 32-bit Interrupt Gate = 1110b.
+
+### 9.2 The 8259 PIC Remap (The IBM vs. Intel Conflict)
+The motherboard pairs two 8259 PIC chips:
+* **Master PIC** (Ports `0x20` / `0x21`): IRQ 0..7
+* **Slave PIC** (Ports `0xA0` / `0xA1`): IRQ 8..15 (Cascaded into Master IRQ 2)
+
+#### The Conflict:
+IBM's default BIOS mapped IRQ 0..7 to interrupt vectors `0x08..0x0F`. On 386+ processors, vector `0x08` is the **Double Fault Exception**. A timer tick (IRQ 0) without remapping immediately triggers an unhandled Double Fault $\rightarrow$ Triple Fault $\rightarrow$ Reboot.
+
+#### The 4-Step Initialization Ritual (ICW1..ICW4):
+1. **ICW1 (`0x11`):** Enter initialization mode with cascade support.
+2. **ICW2 (`0x20`, `0x28`):** Vector offsets:
+   * Master IRQs 0..7 $\rightarrow$ Vectors **`0x20..0x27`** (32..39)
+   * Slave IRQs 8..15 $\rightarrow$ Vectors **`0x28..0x2F`** (40..47)
+3. **ICW3 (`0x04`, `0x02`):** Establish cascade lines (Master Pin 2 $\leftrightarrow$ Slave Identity 2).
+4. **ICW4 (`0x01`):** Select 8086/88 microprocessor environment mode.
+5. **End of Interrupt (EOI):** Handlers must acknowledge completion by sending `outb(0x20, 0x20)` to the Master PIC (and `outb(0xA0, 0x20)` if Slave IRQ) before returning.
+
+### 9.3 The PS/2 Keyboard Driver (IRQ 1 / Vector 0x21)
+The keyboard controller (Intel 8042) pulses IRQ 1 on state transitions:
+* **Make Code (Key Press):** Top bit is `0` (`scancode < 0x80`).
+* **Break Code (Key Release):** Top bit is `1` (`scancode & 0x80` = `Make Code | 0x80`).
+* **Typematic Repeat:** Holding a key triggers the 8042 controller's internal repeat timer, streaming repeated make codes.
+* **Scancode Translation:** We translate PS/2 Set 1 scancodes into ASCII characters via a 128-byte lookup table.
+* **Destructive Backspace:** When `\b` is received, the driver queries current cursor coordinates (`vga_get_x()`, `vga_get_y()`), retreats 1 cell, overwrites with an empty space `' '`, and resets the cursor.
+
+### 9.4 The 8254 PIT Timer (IRQ 0 / Vector 0x20) & Thermal Management
+The Programmable Interval Timer (PIT) provides real-time OS ticks:
+* **Oscillator Base Clock:** $1,193,182\text{ Hz}$.
+* **Divisor Formula:** $\text{Divisor} = \frac{1,193,182}{\text{Target Frequency (Hz)}}$.
+* **Mode 3 (Square Wave):** Configured by writing command `0x36` to Port `0x43`, followed by low/high divisor bytes to Port `0x40`.
+* **Low-Power Sleeping & The `volatile` Keyword:**
+  ```c
+  uint32_t target = timer_ticks + ticks;
+  while (timer_ticks < target) {
+      __asm__ __volatile__("hlt"); // Halts execution core until next IRQ tick
+  }
+  ```
+  * `volatile` prevents the compiler from caching `timer_ticks` in a register.
+  * `hlt` places the physical CPU core in a C1 low-power sleep state, preventing thermal runaway (solving the 100% CPU overheating trap on bare metal!).
+
+### 9.5 The Interrupt Dispatch Pipeline
+```mermaid
+sequenceDiagram
+    participant HW as Hardware (Keyboard / Timer)
+    participant PIC as 8259 PIC
+    participant CPU as x86 CPU
+    participant ASM as interrupt.asm (pusha)
+    participant C as C Handler (timer/keyboard_c)
+
+    HW->>PIC: Pulse IRQ Line (IRQ 0 or 1)
+    PIC->>CPU: Signal INTR pin with Vector (0x20 or 0x21)
+    CPU->>CPU: Push EFLAGS, CS, EIP to stack
+    CPU->>ASM: Jump to ISR Stub (timer/keyboard_handler_asm)
+    ASM->>ASM: pusha (Save all 8 general registers)
+    ASM->>C: call timer/keyboard_handler_c()
+    C->>HW: Read Port 0x60 (if keyboard) / Increment ticks
+    C->>PIC: outb(0x20, 0x20) [Send EOI]
+    C-->>ASM: return
+    ASM->>ASM: popa (Restore all 8 general registers)
+    ASM-->>CPU: iret (Atomically restore EIP, CS, EFLAGS)
+    CPU->>CPU: Resume interrupted code seamlessly!
+```
+
+---
+
+## 10. Summary of Project Map
 
 ```text
 OSfromScratch/
@@ -293,14 +377,21 @@ OSfromScratch/
 │   ├── boot.asm           # 16-bit MBR, disk reader, 32-bit switch, far jump
 │   └── gdt.asm            # GDT null, code, data descriptors & GDTR structure
 ├── drivers/
+│   ├── keyboard.c         # PS/2 keyboard driver (IRQ 1, scancodes, backspace)
 │   ├── ports.c            # Hardware port I/O (inb, outb) in Intel asm
+│   ├── timer.c            # 8254 PIT timer driver (IRQ 0, 100Hz, sleep via hlt)
 │   └── vga.c              # VGA text driver (clear, print, cursor, block render)
 ├── kernel/
+│   ├── idt.c              # 256-gate IDT setup & 8259 PIC remapping
+│   ├── interrupt.asm      # Low-level assembly ISR stubs (pusha/popa/iret)
 │   ├── kernel_entry.asm   # 32-bit trampoline calling kernel_main
 │   └── kernel.c           # High-level C kernel entry point
 ├── include/
-│   ├── types.h            # Bare-metal fixed-width types (uint8_t, size_t, NULL)
+│   ├── idt.h              # IDT entry and pointer packed structures
+│   ├── keyboard.h         # Keyboard driver API prototypes
 │   ├── ports.h            # Hardware port function prototypes
+│   ├── timer.h            # PIT timer API prototypes
+│   ├── types.h            # Bare-metal fixed-width types (uint8_t, size_t, NULL)
 │   └── vga.h              # VGA dimensions, 16-color palette & API prototypes
 ├── linker.ld              # Memory layout linking code at 0x1000
 ├── Makefile               # Automated compilation, disk assembly & QEMU launcher
